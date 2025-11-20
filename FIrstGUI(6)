@@ -1,0 +1,544 @@
+/*
+ * 项目名称：亚马逊棋 (Amazon Chess) - EasyX GUI版
+ * 编译环境：Visual Studio + EasyX图形库
+ * 功能特性：
+ * 1. 图形化界面，鼠标点击交互
+ * 2. 包含人机对战、AI智能、悔棋、存档功能
+ * 3. 界面下方设有功能按钮区
+ */
+
+#include <graphics.h> // EasyX 图形库头文件
+#include <conio.h>
+#include <iostream>
+#include <vector>
+#include <string>
+#include <ctime>
+#include <fstream>
+#include <cmath>
+#include <thread>
+#include <chrono>
+
+using namespace std;
+
+// ==================== 1. 界面与常量定义 ====================
+const int GRID_SIZE = 8;        // 棋盘 8x8
+const int CELL_SIZE = 80;       // 每个格子 80x80 像素
+const int BOARD_PIXEL = GRID_SIZE * CELL_SIZE; // 棋盘总像素 640x640
+const int BUTTON_AREA_HEIGHT = 100; // 底部按钮区高度
+const int WINDOW_WIDTH = BOARD_PIXEL;
+const int WINDOW_HEIGHT = BOARD_PIXEL + BUTTON_AREA_HEIGHT;
+
+// 棋盘元素定义
+const char EMPTY = ' ';
+const char PLAYER = 'O';
+const char AI = 'X';
+const char OBSTACLE = '#';
+
+// 颜色定义 (BGR格式)
+const COLORREF COLOR_BG = WHITE;            // 背景白
+const COLORREF COLOR_GRID = BLACK;          // 网格黑
+const COLORREF COLOR_PLAYER = 0x50C878;     // 玩家绿 (Emerald Green)
+const COLORREF COLOR_AI = 0x3232CD;         // AI红 (Medium Red)
+const COLORREF COLOR_OBSTACLE = 0x00D7FF;   // 障碍金 (Gold)
+const COLORREF COLOR_SELECT = 0xFFA500;     // 选中框蓝 (Orange)
+const COLORREF COLOR_BUTTON = 0xEEEEEE;     // 按钮灰
+
+// 方向数组
+const int DR[] = { -1, 1, 0, 0, -1, -1, 1, 1 };
+const int DC[] = { 0, 0, -1, 1, -1, 1, -1, 1 };
+
+// 游戏状态快照 (用于悔棋)
+struct GameState {
+    char b[GRID_SIZE][GRID_SIZE];
+    bool turn;
+};
+
+// ==================== 2. 全局变量 ====================
+char board[GRID_SIZE][GRID_SIZE];
+bool isPlayerTurn = true;
+bool g_initialPlayerFirst = true; // 记录开局谁先手
+vector<GameState> history;
+
+// ==================== 3. 函数声明 ====================
+void initGame(bool playerFirst);
+void drawGame(string msg = ""); // 绘制整个界面
+void drawSelection(int r, int c); // 绘制选中框
+bool getMouseClick(int& r, int& c); // 获取鼠标点击 (返回true表示点击了棋盘，false表示点击了按钮)
+bool isValidMove(int r1, int c1, int r2, int c2, bool ignoreStart = false);
+void aiTurn();
+bool checkWinCondition();
+void saveGame();
+void loadGame();
+void undoMove();
+void saveState();
+int evaluateBoard();
+
+// ==================== 4. 核心逻辑实现 ====================
+
+// 保存状态
+void saveState() {
+    GameState state;
+    for (int i = 0; i < GRID_SIZE; i++)
+        for (int j = 0; j < GRID_SIZE; j++)
+            state.b[i][j] = board[i][j];
+    state.turn = isPlayerTurn;
+    history.push_back(state);
+}
+
+// 初始化游戏
+void initGame(bool playerFirst) {
+    g_initialPlayerFirst = playerFirst;
+
+    // 清空棋盘
+    for (int i = 0; i < GRID_SIZE; i++)
+        for (int j = 0; j < GRID_SIZE; j++)
+            board[i][j] = EMPTY;
+
+    // 规则：先手在上方 (Top)，后手在下方 (Bottom)
+    char topPiece = playerFirst ? PLAYER : AI;
+    char bottomPiece = playerFirst ? AI : PLAYER;
+
+    // 放置上方棋子
+    board[0][2] = topPiece; board[0][5] = topPiece;
+    board[2][0] = topPiece; board[2][7] = topPiece;
+
+    // 放置下方棋子
+    board[7][2] = bottomPiece; board[7][5] = bottomPiece;
+    board[5][0] = bottomPiece; board[5][7] = bottomPiece;
+
+    isPlayerTurn = playerFirst;
+    history.clear();
+    saveState();
+}
+
+// 绘制界面 (核心绘图函数)
+void drawGame(string msg) {
+    BeginBatchDraw(); // 开始批量绘图，防止闪烁
+
+    cleardevice(); // 清屏
+
+    // 1. 画背景和网格
+    setbkcolor(COLOR_BG);
+    setlinecolor(COLOR_GRID);
+    setlinestyle(PS_SOLID, 2); // 线宽2
+
+    for (int i = 0; i <= GRID_SIZE; i++) {
+        line(0, i * CELL_SIZE, BOARD_PIXEL, i * CELL_SIZE); // 横线
+        line(i * CELL_SIZE, 0, i * CELL_SIZE, BOARD_PIXEL); // 竖线
+    }
+
+    // 2. 画棋子和障碍
+    for (int i = 0; i < GRID_SIZE; i++) {
+        for (int j = 0; j < GRID_SIZE; j++) {
+            int x = j * CELL_SIZE;
+            int y = i * CELL_SIZE;
+            int cx = x + CELL_SIZE / 2;
+            int cy = y + CELL_SIZE / 2;
+            int r = CELL_SIZE / 2 - 10;
+
+            if (board[i][j] == PLAYER) {
+                setfillcolor(COLOR_PLAYER);
+                setlinecolor(BLACK);
+                fillcircle(cx, cy, r);
+                // 画个 'O'
+                setbkmode(TRANSPARENT);
+                settextcolor(WHITE);
+                settextstyle(30, 0, _T("Arial"));
+                outtextxy(cx - 10, cy - 15, _T("O"));
+            }
+            else if (board[i][j] == AI) {
+                setfillcolor(COLOR_AI);
+                setlinecolor(BLACK);
+                fillcircle(cx, cy, r);
+                // 画个 'X'
+                setbkmode(TRANSPARENT);
+                settextcolor(WHITE);
+                settextstyle(30, 0, _T("Arial"));
+                outtextxy(cx - 10, cy - 15, _T("X"));
+            }
+            else if (board[i][j] == OBSTACLE) {
+                setfillcolor(COLOR_OBSTACLE);
+                setlinecolor(BLACK);
+                fillrectangle(x + 10, y + 10, x + CELL_SIZE - 10, y + CELL_SIZE - 10);
+            }
+        }
+    }
+
+    // 3. 画底部按钮区
+    setfillcolor(COLOR_BUTTON);
+    solidrectangle(0, BOARD_PIXEL, WINDOW_WIDTH, WINDOW_HEIGHT);
+
+    // 按钮边框
+    setlinecolor(BLACK);
+    rectangle(20, BOARD_PIXEL + 20, 150, BOARD_PIXEL + 80); // 悔棋
+    rectangle(170, BOARD_PIXEL + 20, 300, BOARD_PIXEL + 80); // 存档
+    rectangle(320, BOARD_PIXEL + 20, 450, BOARD_PIXEL + 80); // 退出
+
+    // 按钮文字
+    settextcolor(BLACK);
+    settextstyle(24, 0, _T("微软雅黑"));
+    outtextxy(45, BOARD_PIXEL + 35, _T("悔棋(Undo)"));
+    outtextxy(195, BOARD_PIXEL + 35, _T("存档(Save)"));
+    outtextxy(345, BOARD_PIXEL + 35, _T("退出(Quit)"));
+
+    // 4. 显示提示信息
+    settextcolor(RED);
+    settextstyle(20, 0, _T("Consolas"));
+    // 将 string 转换为 wstring 以支持 EasyX 输出
+    wstring wmsg(msg.begin(), msg.end());
+    outtextxy(470, BOARD_PIXEL + 40, wmsg.c_str());
+
+    EndBatchDraw(); // 结束批量绘图
+}
+
+// 绘制选中框
+void drawSelection(int r, int c) {
+    setlinecolor(COLOR_SELECT);
+    setlinestyle(PS_SOLID, 4); // 粗线
+    rectangle(c * CELL_SIZE + 2, r * CELL_SIZE + 2, (c + 1) * CELL_SIZE - 2, (r + 1) * CELL_SIZE - 2);
+    FlushBatchDraw();
+}
+
+// 获取鼠标点击
+// 返回值: true = 点击了棋盘格子, false = 点击了按钮或无效区域
+// 如果点击了棋盘，r和c会被赋值为网格坐标
+bool getMouseClick(int& r, int& c) {
+    MOUSEMSG msg;
+    while (true) {
+        msg = GetMouseMsg();
+        if (msg.uMsg == WM_LBUTTONDOWN) { // 左键按下
+
+            // 1. 检查是否点击了棋盘区域
+            if (msg.y < BOARD_PIXEL) {
+                c = msg.x / CELL_SIZE;
+                r = msg.y / CELL_SIZE;
+                if (r >= 0 && r < GRID_SIZE && c >= 0 && c < GRID_SIZE) {
+                    return true;
+                }
+            }
+            // 2. 检查是否点击了按钮区域
+            else {
+                // 悔棋按钮 (20~150)
+                if (msg.x >= 20 && msg.x <= 150 && msg.y >= BOARD_PIXEL + 20 && msg.y <= BOARD_PIXEL + 80) {
+                    undoMove();
+                    return false; // 触发了功能，不返回棋盘坐标
+                }
+                // 存档按钮 (170~300)
+                else if (msg.x >= 170 && msg.x <= 300 && msg.y >= BOARD_PIXEL + 20 && msg.y <= BOARD_PIXEL + 80) {
+                    saveGame();
+                    return false;
+                }
+                // 退出按钮 (320~450)
+                else if (msg.x >= 320 && msg.x <= 450 && msg.y >= BOARD_PIXEL + 20 && msg.y <= BOARD_PIXEL + 80) {
+                    closegraph();
+                    exit(0);
+                }
+            }
+        }
+    }
+}
+
+// 移动合法性检查 (同之前逻辑)
+bool isValidMove(int r1, int c1, int r2, int c2, bool ignoreStart) {
+    if (r1 < 0 || r1 >= GRID_SIZE || c1 < 0 || c1 >= GRID_SIZE) return false;
+    if (r2 < 0 || r2 >= GRID_SIZE || c2 < 0 || c2 >= GRID_SIZE) return false;
+    if (board[r2][c2] != EMPTY) return false;
+
+    int dr = r2 - r1;
+    int dc = c2 - c1;
+    if (dr != 0 && dc != 0 && abs(dr) != abs(dc)) return false;
+    if (dr == 0 && dc == 0) return false;
+
+    int stepR = (dr == 0) ? 0 : (dr > 0 ? 1 : -1);
+    int stepC = (dc == 0) ? 0 : (dc > 0 ? 1 : -1);
+    int currR = r1 + stepR;
+    int currC = c1 + stepC;
+
+    while (currR != r2 || currC != c2) {
+        if (board[currR][currC] != EMPTY) return false;
+        currR += stepR;
+        currC += stepC;
+    }
+    return true;
+}
+
+// ==================== 5. AI 逻辑 (带延时) ====================
+
+int countMobility(int r, int c) {
+    int moves = 0;
+    for (int k = 0; k < 8; k++) {
+        int nr = r + DR[k];
+        int nc = c + DC[k];
+        while (nr >= 0 && nr < GRID_SIZE && nc >= 0 && nc < GRID_SIZE && board[nr][nc] == EMPTY) {
+            moves++; nr += DR[k]; nc += DC[k];
+        }
+    }
+    return moves;
+}
+
+int evaluateBoard() {
+    int aiScore = 0, playerScore = 0;
+    for (int i = 0; i < GRID_SIZE; i++) {
+        for (int j = 0; j < GRID_SIZE; j++) {
+            if (board[i][j] == AI) aiScore += countMobility(i, j);
+            else if (board[i][j] == PLAYER) playerScore += countMobility(i, j);
+        }
+    }
+    return aiScore - playerScore;
+}
+
+void aiTurn() {
+    drawGame("AI: Thinking...");
+    Sleep(800); // 模拟思考
+
+    struct BestMove { int r1, c1, r2, c2, score; };
+    BestMove bestMove = { -1, -1, -1, -1, -100000 };
+
+    // 1. 找最佳移动
+    for (int i = 0; i < GRID_SIZE; i++) {
+        for (int j = 0; j < GRID_SIZE; j++) {
+            if (board[i][j] == AI) {
+                for (int k = 0; k < 8; k++) {
+                    int r = i + DR[k];
+                    int c = j + DC[k];
+                    while (r >= 0 && r < GRID_SIZE && c >= 0 && c < GRID_SIZE && board[r][c] == EMPTY) {
+                        board[i][j] = EMPTY; board[r][c] = AI;
+                        int score = evaluateBoard();
+                        if (score > bestMove.score) {
+                            bestMove.score = score; bestMove.r1 = i; bestMove.c1 = j; bestMove.r2 = r; bestMove.c2 = c;
+                        }
+                        else if (score == bestMove.score && rand() % 2 == 0) {
+                            bestMove.r1 = i; bestMove.c1 = j; bestMove.r2 = r; bestMove.c2 = c;
+                        }
+                        board[r][c] = EMPTY; board[i][j] = AI;
+                        r += DR[k]; c += DC[k];
+                    }
+                }
+            }
+        }
+    }
+
+    if (bestMove.r1 == -1) return;
+
+    // 执行移动
+    board[bestMove.r1][bestMove.c1] = EMPTY;
+    board[bestMove.r2][bestMove.c2] = AI;
+    drawGame("AI: Moved. Aiming...");
+    Sleep(600);
+
+    // 2. 找最佳射箭
+    int bestShotR = -1, bestShotC = -1, bestShotScore = -100000;
+    for (int k = 0; k < 8; k++) {
+        int r = bestMove.r2 + DR[k];
+        int c = bestMove.c2 + DC[k];
+        while (r >= 0 && r < GRID_SIZE && c >= 0 && c < GRID_SIZE && board[r][c] == EMPTY) {
+            board[r][c] = OBSTACLE;
+            int score = evaluateBoard();
+            if (score > bestShotScore) {
+                bestShotScore = score; bestShotR = r; bestShotC = c;
+            }
+            else if (score == bestShotScore && rand() % 2 == 0) {
+                bestShotR = r; bestShotC = c;
+            }
+            board[r][c] = EMPTY;
+            r += DR[k]; c += DC[k];
+        }
+    }
+
+    // 兜底
+    if (bestShotR == -1) {
+        for (int k = 0; k < 8; k++) {
+            int r = bestMove.r2 + DR[k]; int c = bestMove.c2 + DC[k];
+            if (r >= 0 && r < GRID_SIZE && c >= 0 && c < GRID_SIZE && board[r][c] == EMPTY) {
+                bestShotR = r; bestShotC = c; break;
+            }
+        }
+    }
+
+    if (bestShotR != -1) {
+        board[bestShotR][bestShotC] = OBSTACLE;
+        drawGame("AI: Fired Arrow!");
+        Sleep(800);
+    }
+}
+
+// ==================== 6. 辅助功能 ====================
+
+void undoMove() {
+    if (history.size() < 2) {
+        MessageBox(GetHWnd(), _T("无法悔棋：没有足够的历史记录"), _T("提示"), MB_OK);
+        return;
+    }
+    history.pop_back(); // 弹出AI步
+    history.pop_back(); // 弹出玩家步
+
+    if (!history.empty()) {
+        GameState prevState = history.back();
+        for (int i = 0; i < GRID_SIZE; i++)
+            for (int j = 0; j < GRID_SIZE; j++)
+                board[i][j] = prevState.b[i][j];
+        isPlayerTurn = true;
+        drawGame("Undo Successful");
+    }
+    else {
+        initGame(g_initialPlayerFirst);
+        drawGame("Reset to Start");
+    }
+}
+
+void saveGame() {
+    ofstream file("amazon_save.txt");
+    if (file.is_open()) {
+        file << isPlayerTurn << endl;
+        for (int i = 0; i < GRID_SIZE; i++) {
+            for (int j = 0; j < GRID_SIZE; j++) file << board[i][j];
+            file << endl;
+        }
+        file.close();
+        MessageBox(GetHWnd(), _T("游戏已保存！"), _T("提示"), MB_OK);
+    }
+}
+
+void loadGame() {
+    ifstream file("amazon_save.txt");
+    if (file.is_open()) {
+        file >> isPlayerTurn;
+        string dummy; getline(file, dummy);
+        for (int i = 0; i < GRID_SIZE; i++) {
+            string line; getline(file, line);
+            for (int j = 0; j < GRID_SIZE && j < line.length(); j++) board[i][j] = line[j];
+        }
+        file.close();
+        history.clear();
+        saveState();
+        drawGame("Game Loaded");
+    }
+    else {
+        MessageBox(GetHWnd(), _T("未找到存档文件！"), _T("错误"), MB_OK);
+    }
+}
+
+bool checkWinCondition() {
+    char currentPlayer = isPlayerTurn ? PLAYER : AI;
+    bool canMove = false;
+    for (int i = 0; i < GRID_SIZE; i++) {
+        for (int j = 0; j < GRID_SIZE; j++) {
+            if (board[i][j] == currentPlayer) {
+                for (int k = 0; k < 8; k++) {
+                    int r = i + DR[k]; int c = j + DC[k];
+                    if (r >= 0 && r < GRID_SIZE && c >= 0 && c < GRID_SIZE && board[r][c] == EMPTY) {
+                        canMove = true; goto check_end;
+                    }
+                }
+            }
+        }
+    }
+check_end:
+    if (!canMove) {
+        if (isPlayerTurn) MessageBox(GetHWnd(), _T("AI 获胜！你无路可走了。"), _T("游戏结束"), MB_OK);
+        else MessageBox(GetHWnd(), _T("你赢了！AI 无路可走了。"), _T("游戏结束"), MB_OK);
+        return true;
+    }
+    return false;
+}
+
+// ==================== 7. 主函数 ====================
+
+int main() {
+    srand((unsigned)time(0));
+
+    // 初始化图形窗口
+    initgraph(WINDOW_WIDTH, WINDOW_HEIGHT);
+    setbkmode(TRANSPARENT); // 文字背景透明
+
+    // 1. 询问开局 (简单的控制台输入，或者默认)
+    // 为了保持GUI纯粹性，这里用MessageBox询问
+    int msgResult = MessageBox(GetHWnd(), _T("是否加载存档？\n(是=加载, 否=新游戏)"), _T("欢迎"), MB_YESNO);
+    if (msgResult == IDYES) {
+        loadGame();
+    }
+    else {
+        msgResult = MessageBox(GetHWnd(), _T("是否由你先手？\n(是=玩家先, 否=AI先)"), _T("新游戏"), MB_YESNO);
+        initGame(msgResult == IDYES);
+    }
+
+    drawGame("Game Start");
+
+    // 游戏主循环
+    while (true) {
+        if (checkWinCondition()) break;
+
+        if (isPlayerTurn) {
+            int r1, c1, r2, c2, r3, c3;
+
+            // --- 阶段1: 选择棋子 ---
+            drawGame("Your Turn: Select Piece");
+            while (true) {
+                if (getMouseClick(r1, c1)) { // 如果点击了棋盘
+                    if (board[r1][c1] == PLAYER) {
+                        drawSelection(r1, c1); // 画框
+                        break;
+                    }
+                }
+                else {
+                    // 点击了按钮(悔棋等)，重绘界面
+                    drawGame("Your Turn: Select Piece");
+                }
+            }
+
+            // --- 阶段2: 移动棋子 ---
+            drawGame("Your Turn: Move To...");
+            drawSelection(r1, c1); // 保持选中状态
+            while (true) {
+                if (getMouseClick(r2, c2)) {
+                    // 如果点击了同一个棋子，取消选中（重新开始）
+                    if (r2 == r1 && c2 == c1) {
+                        r1 = -1; // 重置
+                        break;
+                    }
+                    if (isValidMove(r1, c1, r2, c2)) {
+                        board[r1][c1] = EMPTY;
+                        board[r2][c2] = PLAYER;
+                        drawGame("Your Turn: Shoot Arrow");
+                        break;
+                    }
+                }
+                else {
+                    // 点击了按钮，可能导致状态回退，需要重新判断
+                    if (isPlayerTurn) { // 如果悔棋后还是玩家回合
+                        r1 = -1; break; // 跳出重选
+                    }
+                }
+            }
+            if (r1 == -1) continue; // 重新开始回合
+
+            // --- 阶段3: 射箭 ---
+            while (true) {
+                if (getMouseClick(r3, c3)) {
+                    if (isValidMove(r2, c2, r3, c3, true)) {
+                        board[r3][c3] = OBSTACLE;
+                        saveState(); // 玩家操作完成，保存状态
+                        break;
+                    }
+                }
+                else {
+                    // 射箭阶段点击按钮处理略复杂，这里简化为不允许或重置
+                    // 实际逻辑中，悔棋会直接重置整个回合
+                    if (isPlayerTurn) { r1 = -1; break; }
+                }
+            }
+            if (r1 == -1) continue;
+
+            isPlayerTurn = false;
+        }
+        else {
+            // AI 回合
+            aiTurn();
+            saveState(); // AI操作完成，保存状态
+            isPlayerTurn = true;
+        }
+    }
+
+    closegraph();
+    return 0;
+}
