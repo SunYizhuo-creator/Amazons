@@ -1,0 +1,518 @@
+/*
+ * 项目名称：亚马逊棋 (Amazon Chess) - 动态布局版
+ * 更新内容：
+ * 1. 动态布局：先手方（无论是玩家还是AI）棋子固定在棋盘上方。
+ * 2. 完整功能：包含AI拟人化提示、延时、存档、悔棋、颜色显示。
+ */
+
+#include <iostream>
+#include <vector>
+#include <string>
+#include <cstdlib> // rand, system
+#include <ctime>   // time
+#include <fstream> // file io
+#include <cmath>   // abs
+#include <thread>  // 用于延时 (C++11)
+#include <chrono>  // 用于时间单位 (C++11)
+
+using namespace std;
+
+// ==================== 1. 颜色代码定义 ====================
+const string RESET_COLOR = "\033[0m";
+const string RED_COLOR = "\033[31m";    // AI (红色)
+const string GREEN_COLOR = "\033[32m";  // 玩家 (绿色)
+const string YELLOW_COLOR = "\033[33m"; // 障碍 (黄色)
+const string BLUE_COLOR = "\033[34m";   // 提示
+const string CYAN_COLOR = "\033[36m";   // 边框
+
+// ==================== 2. 常量与全局定义 ====================
+const int BOARD_SIZE = 8;
+const char EMPTY = ' ';
+const char PLAYER = 'O';
+const char AI = 'X';
+const char OBSTACLE = '#';
+
+const int DR[] = { -1, 1, 0, 0, -1, -1, 1, 1 };
+const int DC[] = { 0, 0, -1, 1, -1, 1, -1, 1 };
+
+struct GameState {
+    char b[BOARD_SIZE][BOARD_SIZE];
+    bool turn;
+};
+
+// ==================== 3. 全局变量 ====================
+char board[BOARD_SIZE][BOARD_SIZE];
+bool isPlayerTurn = true; 
+bool g_initialPlayerFirst = true; // 记录开局谁先手，用于悔棋重置
+vector<GameState> history;
+
+// ==================== 4. 函数声明 ====================
+void initBoard(bool playerFirst);
+void drawBoard();
+void showMenu();
+void showInGameMenu();
+void saveGame();
+void loadGame();
+void saveState();
+void undoMove();
+bool isValidMove(int r1, int c1, int r2, int c2, bool ignoreStart = false);
+void playerTurn();
+void aiTurn();
+bool checkWinCondition();
+int evaluateBoard();
+
+// ==================== 5. 工具函数 ====================
+
+void clearScreen() {
+#ifdef _WIN32
+    system("cls");
+#else
+    system("clear");
+#endif
+}
+
+void waitMilliseconds(int ms) {
+    this_thread::sleep_for(chrono::milliseconds(ms));
+}
+
+void saveState() {
+    GameState state;
+    for (int i = 0; i < BOARD_SIZE; i++)
+        for (int j = 0; j < BOARD_SIZE; j++)
+            state.b[i][j] = board[i][j];
+    state.turn = isPlayerTurn;
+    history.push_back(state);
+}
+
+// === 修改点：根据先手决定棋子位置 ===
+void initBoard(bool playerFirst) {
+    g_initialPlayerFirst = playerFirst; // 记录设定
+
+    // 清空棋盘
+    for (int i = 0; i < BOARD_SIZE; i++)
+        for (int j = 0; j < BOARD_SIZE; j++)
+            board[i][j] = EMPTY;
+
+    // 决定谁在上方(Top)，谁在下方(Bottom)
+    // 规则：先手在上方
+    char topPiece = playerFirst ? PLAYER : AI;
+    char bottomPiece = playerFirst ? AI : PLAYER;
+
+    // 放置上方棋子 (Rows 0, 2)
+    board[0][2] = topPiece; board[0][5] = topPiece;
+    board[2][0] = topPiece; board[2][7] = topPiece;
+
+    // 放置下方棋子 (Rows 5, 7)
+    board[7][2] = bottomPiece; board[7][5] = bottomPiece;
+    board[5][0] = bottomPiece; board[5][7] = bottomPiece;
+
+    // 设置当前回合
+    isPlayerTurn = playerFirst;
+    
+    // 初始化历史
+    history.clear();
+    saveState();
+}
+
+void drawBoard() {
+    clearScreen();
+    cout << CYAN_COLOR << "==========================================" << RESET_COLOR << endl;
+    cout << "          Amazon Chess (8x8)             " << endl;
+    cout << CYAN_COLOR << "==========================================" << RESET_COLOR << endl;
+    cout << "Player: " << GREEN_COLOR << PLAYER << RESET_COLOR 
+         << " | AI: " << RED_COLOR << AI << RESET_COLOR 
+         << " | Obstacle: " << YELLOW_COLOR << OBSTACLE << RESET_COLOR << endl << endl;
+
+    cout << "   ";
+    for (int j = 0; j < BOARD_SIZE; j++) cout << " " << j << "  ";
+    cout << endl;
+
+    cout << "  +";
+    for (int j = 0; j < BOARD_SIZE; j++) cout << "---+";
+    cout << endl;
+
+    for (int i = 0; i < BOARD_SIZE; i++) {
+        cout << i << " |";
+        for (int j = 0; j < BOARD_SIZE; j++) {
+            char piece = board[i][j];
+            cout << " ";
+            if (piece == PLAYER) cout << GREEN_COLOR << piece << RESET_COLOR;
+            else if (piece == AI) cout << RED_COLOR << piece << RESET_COLOR;
+            else if (piece == OBSTACLE) cout << YELLOW_COLOR << piece << RESET_COLOR;
+            else cout << piece;
+            cout << " |";
+        }
+        cout << endl;
+        cout << "  +";
+        for (int j = 0; j < BOARD_SIZE; j++) cout << "---+";
+        cout << endl;
+    }
+}
+
+bool isValidMove(int r1, int c1, int r2, int c2, bool isArrowShot) {
+    if (r1 < 0 || r1 >= BOARD_SIZE || c1 < 0 || c1 >= BOARD_SIZE) return false;
+    if (r2 < 0 || r2 >= BOARD_SIZE || c2 < 0 || c2 >= BOARD_SIZE) return false;
+    if (board[r2][c2] != EMPTY) return false;
+
+    int dr = r2 - r1;
+    int dc = c2 - c1;
+
+    if (dr != 0 && dc != 0 && abs(dr) != abs(dc)) return false;
+    if (dr == 0 && dc == 0) return false;
+
+    int stepR = (dr == 0) ? 0 : (dr > 0 ? 1 : -1);
+    int stepC = (dc == 0) ? 0 : (dc > 0 ? 1 : -1);
+
+    int currR = r1 + stepR;
+    int currC = c1 + stepC;
+
+    while (currR != r2 || currC != c2) {
+        if (board[currR][currC] != EMPTY) return false;
+        currR += stepR;
+        currC += stepC;
+    }
+    return true;
+}
+
+// ==================== 6. AI 智能算法 ====================
+
+int countMobility(int r, int c) {
+    int moves = 0;
+    for (int k = 0; k < 8; k++) {
+        int nr = r + DR[k];
+        int nc = c + DC[k];
+        while (nr >= 0 && nr < BOARD_SIZE && nc >= 0 && nc < BOARD_SIZE && board[nr][nc] == EMPTY) {
+            moves++;
+            nr += DR[k];
+            nc += DC[k];
+        }
+    }
+    return moves;
+}
+
+int evaluateBoard() {
+    int aiScore = 0;
+    int playerScore = 0;
+    for (int i = 0; i < BOARD_SIZE; i++) {
+        for (int j = 0; j < BOARD_SIZE; j++) {
+            if (board[i][j] == AI) aiScore += countMobility(i, j);
+            else if (board[i][j] == PLAYER) playerScore += countMobility(i, j);
+        }
+    }
+    return aiScore - playerScore;
+}
+
+void aiTurn() {
+    cout << "\n" << RED_COLOR << "[AI Turn]" << RESET_COLOR << endl;
+    cout << "AI: Thinking..." << endl;
+    waitMilliseconds(800); // 思考停顿
+
+    struct BestMove {
+        int r1, c1, r2, c2;
+        int score;
+    };
+
+    BestMove bestMove = { -1, -1, -1, -1, -100000 };
+    
+    // 寻找最佳移动
+    for (int i = 0; i < BOARD_SIZE; i++) {
+        for (int j = 0; j < BOARD_SIZE; j++) {
+            if (board[i][j] == AI) {
+                for (int k = 0; k < 8; k++) {
+                    int r = i + DR[k];
+                    int c = j + DC[k];
+                    while (r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE && board[r][c] == EMPTY) {
+                        board[i][j] = EMPTY;
+                        board[r][c] = AI;
+                        int currentScore = evaluateBoard();
+                        if (currentScore > bestMove.score) {
+                            bestMove.score = currentScore;
+                            bestMove.r1 = i; bestMove.c1 = j;
+                            bestMove.r2 = r; bestMove.c2 = c;
+                        }
+                        else if (currentScore == bestMove.score && rand() % 2 == 0) {
+                            bestMove.r1 = i; bestMove.c1 = j;
+                            bestMove.r2 = r; bestMove.c2 = c;
+                        }
+                        board[r][c] = EMPTY;
+                        board[i][j] = AI;
+                        r += DR[k];
+                        c += DC[k];
+                    }
+                }
+            }
+        }
+    }
+
+    if (bestMove.r1 == -1) return;
+
+    cout << "AI: Moving (" << bestMove.r1 << "," << bestMove.c1 
+         << ") -> (" << bestMove.r2 << "," << bestMove.c2 << ")." << endl;
+    waitMilliseconds(1000); // 移动停顿
+
+    board[bestMove.r1][bestMove.c1] = EMPTY;
+    board[bestMove.r2][bestMove.c2] = AI;
+
+    cout << "AI: Aiming arrow..." << endl;
+    waitMilliseconds(600); // 瞄准停顿
+
+    int bestShotR = -1, bestShotC = -1;
+    int bestShotScore = -100000;
+
+    for (int k = 0; k < 8; k++) {
+        int r = bestMove.r2 + DR[k];
+        int c = bestMove.c2 + DC[k];
+        while (r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE && board[r][c] == EMPTY) {
+            board[r][c] = OBSTACLE;
+            int score = evaluateBoard();
+            if (score > bestShotScore) {
+                bestShotScore = score;
+                bestShotR = r; bestShotC = c;
+            } else if (score == bestShotScore && rand() % 2 == 0) {
+                bestShotR = r; bestShotC = c;
+            }
+            board[r][c] = EMPTY;
+            r += DR[k];
+            c += DC[k];
+        }
+    }
+
+    if (bestShotR == -1) {
+         for (int k = 0; k < 8; k++) {
+            int r = bestMove.r2 + DR[k];
+            int c = bestMove.c2 + DC[k];
+            if (r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE && board[r][c] == EMPTY) {
+                bestShotR = r; bestShotC = c; break;
+            }
+         }
+    }
+
+    if (bestShotR != -1) {
+        board[bestShotR][bestShotC] = OBSTACLE;
+        cout << "AI: Fired at (" << bestShotR << "," << bestShotC << ")!" << endl;
+        waitMilliseconds(1000); // 射箭停顿
+    }
+}
+
+// ==================== 7. 玩家交互 ====================
+
+void showInGameMenu() {
+    cout << "\n" << BLUE_COLOR << "=== Game Paused ===" << RESET_COLOR << endl;
+    cout << "1. Resume (继续)" << endl;
+    cout << "2. Save Game (存档)" << endl;
+    cout << "3. Undo Move (悔棋)" << endl;
+    cout << "4. Quit (退出)" << endl;
+    cout << "Select: ";
+    
+    int choice;
+    cin >> choice;
+    
+    if (choice == 2) {
+        saveGame();
+        cout << "Game saved. Resume? (1:Yes / 0:No): ";
+        int c; cin >> c;
+        if (c == 0) exit(0);
+        drawBoard();
+    }
+    else if (choice == 3) {
+        undoMove();
+    }
+    else if (choice == 4) {
+        cout << "Bye!" << endl;
+        exit(0);
+    }
+    else {
+        drawBoard();
+    }
+}
+
+void playerTurn() {
+    int x1, y1, x2, y2, x3, y3;
+
+    cout << "\n" << GREEN_COLOR << "[Player Turn]" << RESET_COLOR << endl;
+    cout << "Tip: Enter " << YELLOW_COLOR << "-1 -1" << RESET_COLOR << " to open Menu." << endl;
+
+    while (true) {
+        cout << "1. Select piece (Row Col): ";
+        cin >> x1 >> y1;
+        if (x1 == -1) { showInGameMenu(); cout << "\n" << GREEN_COLOR << "[Player Turn]" << RESET_COLOR << endl; continue; }
+        if (cin.fail()) { cin.clear(); cin.ignore(1000, '\n'); continue; }
+
+        if (x1 >= 0 && x1 < BOARD_SIZE && y1 >= 0 && y1 < BOARD_SIZE && board[x1][y1] == PLAYER) break;
+        cout << "Invalid! Select your own piece (" << GREEN_COLOR << "O" << RESET_COLOR << ")." << endl;
+    }
+
+    while (true) {
+        cout << "2. Move to (Row Col): ";
+        cin >> x2 >> y2;
+        if (x2 == -1) { showInGameMenu(); cout << "Re-select move: " << endl; continue; }
+        if (isValidMove(x1, y1, x2, y2, false)) {
+            board[x1][y1] = EMPTY;
+            board[x2][y2] = PLAYER;
+            drawBoard();
+            break;
+        }
+        cout << "Invalid move!" << endl;
+    }
+
+    while (true) {
+        cout << "3. Shoot arrow (Row Col): ";
+        cin >> x3 >> y3;
+        if (x3 == -1) { showInGameMenu(); cout << "Re-select shot: " << endl; continue; }
+        if (isValidMove(x2, y2, x3, y3, true)) {
+            board[x3][y3] = OBSTACLE;
+            break;
+        }
+        cout << "Invalid shot!" << endl;
+    }
+}
+
+void undoMove() {
+    if (history.size() < 2) {
+        cout << "Cannot undo: Not enough history." << endl;
+        return;
+    }
+    history.pop_back(); 
+    history.pop_back(); 
+    
+    if (!history.empty()) {
+        GameState prevState = history.back();
+        for(int i=0; i<BOARD_SIZE; i++)
+            for(int j=0; j<BOARD_SIZE; j++)
+                board[i][j] = prevState.b[i][j];
+        
+        isPlayerTurn = true; 
+        cout << "Undo successful!" << endl;
+        drawBoard();
+    } else {
+        // 悔棋到开局，使用全局变量重置
+        initBoard(g_initialPlayerFirst);
+        drawBoard();
+    }
+}
+
+bool checkWinCondition() {
+    char currentPlayer = isPlayerTurn ? PLAYER : AI;
+    bool canMove = false;
+
+    for (int i = 0; i < BOARD_SIZE; i++) {
+        for (int j = 0; j < BOARD_SIZE; j++) {
+            if (board[i][j] == currentPlayer) {
+                for (int k = 0; k < 8; k++) {
+                    int r = i + DR[k];
+                    int c = j + DC[k];
+                    if (r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE && board[r][c] == EMPTY) {
+                        canMove = true;
+                        goto check_end;
+                    }
+                }
+            }
+        }
+    }
+
+check_end:
+    if (!canMove) {
+        cout << "\n" << BLUE_COLOR << "GAME OVER!" << RESET_COLOR << endl;
+        if (isPlayerTurn) cout << RED_COLOR << "AI Wins! You are trapped." << RESET_COLOR << endl;
+        else cout << GREEN_COLOR << "You Win! AI is trapped." << RESET_COLOR << endl;
+        cout << "Press Enter to return to menu...";
+        cin.ignore(); cin.get();
+        return true;
+    }
+    return false;
+}
+
+void saveGame() {
+    ofstream file("amazon_save.txt");
+    if (file.is_open()) {
+        file << isPlayerTurn << endl;
+        for (int i = 0; i < BOARD_SIZE; i++) {
+            for (int j = 0; j < BOARD_SIZE; j++) file << board[i][j];
+            file << endl;
+        }
+        file.close();
+        cout << "Game saved!" << endl;
+    } else cout << "Error saving." << endl;
+}
+
+void loadGame() {
+    ifstream file("amazon_save.txt");
+    if (file.is_open()) {
+        file >> isPlayerTurn;
+        string dummy; getline(file, dummy);
+        for (int i = 0; i < BOARD_SIZE; i++) {
+            string line; getline(file, line);
+            for (int j = 0; j < BOARD_SIZE && j < line.length(); j++) board[i][j] = line[j];
+        }
+        file.close();
+        history.clear();
+        saveState();
+        cout << "Game loaded!" << endl;
+    } else cout << "No save file." << endl;
+}
+
+// ==================== 8. 主菜单 ====================
+void showMenu() {
+    while (true) {
+        clearScreen();
+        cout << BLUE_COLOR << "=========================" << RESET_COLOR << endl;
+        cout << "   AMAZON CHESS SYSTEM   " << endl;
+        cout << BLUE_COLOR << "=========================" << RESET_COLOR << endl;
+        cout << "1. New Game" << endl;
+        cout << "2. Load Game" << endl;
+        cout << "3. Quit" << endl;
+        cout << "Select: ";
+
+        int choice;
+        cin >> choice;
+
+        if (choice == 1) {
+            // 询问先手
+            cout << "Do you want to move first? (y/n): ";
+            char c; cin >> c;
+            bool playerFirst = (c == 'y' || c == 'Y');
+
+            initBoard(playerFirst);
+            drawBoard();
+            
+            while (true) {
+                if (checkWinCondition()) break;
+
+                if (isPlayerTurn) {
+                    playerTurn();
+                    saveState();
+                } else {
+                    aiTurn();
+                    saveState();
+                }
+                
+                drawBoard();
+                isPlayerTurn = !isPlayerTurn;
+            }
+        }
+        else if (choice == 2) {
+            loadGame();
+            cout << "Start? (y/n): ";
+            char c; cin >> c;
+            if (c == 'y') {
+                drawBoard();
+                while (true) {
+                    if (checkWinCondition()) break;
+                    if (isPlayerTurn) { playerTurn(); saveState(); }
+                    else { aiTurn(); saveState(); }
+                    drawBoard();
+                    isPlayerTurn = !isPlayerTurn;
+                }
+            }
+        }
+        else if (choice == 3) {
+            exit(0);
+        }
+    }
+}
+
+int main() {
+    srand(time(0));
+    showMenu();
+    return 0;
+}
