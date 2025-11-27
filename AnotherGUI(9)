@@ -1,0 +1,689 @@
+/* 先是Main.cpp
+
+#include <SFML/Graphics.hpp>
+#include <SFML/Audio.hpp>
+#include <iostream>
+#include <vector>
+#include <list>
+#include <cmath>
+#include <algorithm>
+#include <thread>
+#include <chrono>
+#include <fstream>
+
+using namespace std;
+using namespace sf;
+
+// ==========================================
+// Part 0: 基础常量与工具
+// ==========================================
+const int BOARD_SIZE = 8;
+const int CELL_SIZE = 90; // 更大的格子
+const int GRID_OFFSET_X = 60;
+const int GRID_OFFSET_Y = 60;
+const int WINDOW_WIDTH = 1280; // 宽屏
+const int WINDOW_HEIGHT = 800;
+
+const int EMPTY = 0;
+const int BLACK = 1; // 玩家
+const int WHITE = 2; // AI
+const int OBSTACLE = 3;
+
+// 缓动函数 (Easing Functions)
+float easeOutBack(float t) {
+    const float c1 = 1.70158f;
+    const float c3 = c1 + 1.0f;
+    return 1.0f + c3 * pow(t - 1.0f, 3.0f) + c1 * pow(t - 1.0f, 2.0f);
+}
+
+float easeInOutCubic(float t) {
+    return t < 0.5f ? 4.0f * t * t * t : 1.0f - pow(-2.0f * t + 2.0f, 3.0f) / 2.0f;
+}
+
+// ==========================================
+// Part 1: 粒子系统 (Particle System)
+// ==========================================
+struct Particle {
+    Vector2f pos;
+    Vector2f vel;
+    float life;      // 1.0 -> 0.0
+    float maxLife;
+    Color color;
+    float size;
+    float rotation;
+    float rotSpeed;
+};
+
+class ParticleSystem {
+private:
+    list<Particle> particles;
+
+public:
+    void spawn(Vector2f pos, Color color, int count, float speed) {
+        for (int i = 0; i < count; i++) {
+            Particle p;
+            p.pos = pos;
+            float angle = (rand() % 360) * 3.14159f / 180.0f;
+            float s = (rand() % 100) / 100.0f * speed;
+            p.vel = Vector2f(cos(angle) * s, sin(angle) * s);
+            p.life = 1.0f;
+            p.maxLife = 0.5f + (rand() % 100) / 200.0f;
+            p.color = color;
+            p.size = 2.0f + (rand() % 5);
+            p.rotation = rand() % 360;
+            p.rotSpeed = (rand() % 10) - 5.0f;
+            particles.push_back(p);
+        }
+    }
+
+    void update() {
+        for (auto it = particles.begin(); it != particles.end();) {
+            it->pos += it->vel;
+            it->rotation += it->rotSpeed;
+            it->life -= 0.02f; // 衰减
+            it->color.a = static_cast<Uint8>(it->life * 255); // 透明度渐变
+
+            if (it->life <= 0) it = particles.erase(it);
+            else ++it;
+        }
+    }
+
+    void render(RenderTarget& target) {
+        for (const auto& p : particles) {
+            RectangleShape shape(Vector2f(p.size, p.size));
+            shape.setOrigin(p.size / 2, p.size / 2);
+            shape.setPosition(p.pos);
+            shape.setRotation(p.rotation);
+            shape.setFillColor(p.color);
+            target.draw(shape, BlendAdd); // 叠加混合模式，发光效果
+        }
+    }
+};
+
+// ==========================================
+// Part 2: 资源管理 (Asset Manager)
+// ==========================================
+class AssetManager {
+public:
+    Texture texBg1, texBg2, texBg3; // 视差背景
+    Texture texBoardBase;
+    Texture texP1, texP2, texP1Full, texP2Full;
+    Texture texCursor;
+    Font font;
+    Shader bloomShader;
+    bool hasShader = false;
+
+    static AssetManager& get() {
+        static AssetManager instance;
+        return instance;
+    }
+
+    void load() {
+        // 尝试加载资源，失败则忽略
+        texBg1.loadFromFile("bg_layer1.png");
+        texBg2.loadFromFile("bg_layer2.png");
+        texBg3.loadFromFile("bg_layer3.png");
+        texBoardBase.loadFromFile("board_base.png");
+        texP1.loadFromFile("piece_p1.png");
+        texP2.loadFromFile("piece_p2.png");
+        texP1Full.loadFromFile("piece_p1_full.png");
+        texP2Full.loadFromFile("piece_p2_full.png");
+        texCursor.loadFromFile("cursor.png");
+
+        // 字体加载
+        if (!font.loadFromFile("font.ttf")) {
+            font.loadFromFile("C:/Windows/Fonts/msyh.ttc");
+        }
+
+        // 着色器加载
+        if (Shader::isAvailable() && bloomShader.loadFromFile("bloom.frag", Shader::Fragment)) {
+            hasShader = true;
+        }
+    }
+};
+
+// ==========================================
+// Part 3: AI 逻辑 (AmazonBot) - 整合版
+// ==========================================
+struct Move { int r1, c1, r2, c2, r3, c3; int score; };
+
+class AmazonBot {
+private:
+    int board[BOARD_SIZE][BOARD_SIZE];
+    int myColor, opColor;
+public:
+    const int DR[8] = { -1, -1, -1, 0, 0, 1, 1, 1 };
+    const int DC[8] = { -1, 0, 1, -1, 1, -1, 0, 1 };
+
+    AmazonBot() { memset(board, 0, sizeof(board)); }
+    void setBoard(int b[BOARD_SIZE][BOARD_SIZE]) { memcpy(board, b, sizeof(board)); }
+    void setColor(int color) { myColor = color; opColor = (color == BLACK) ? WHITE : BLACK; }
+
+    int evaluate(int b[BOARD_SIZE][BOARD_SIZE]) {
+        int myMob = 0, opMob = 0;
+        for (int i = 0; i < BOARD_SIZE; i++)
+            for (int j = 0; j < BOARD_SIZE; j++)
+                if (b[i][j] == myColor) myMob += countMoves(b, i, j);
+                else if (b[i][j] == opColor) opMob += countMoves(b, i, j);
+        return myMob - opMob;
+    }
+
+    int countMoves(int b[BOARD_SIZE][BOARD_SIZE], int r, int c) {
+        int moves = 0;
+        for (int k = 0; k < 8; k++) {
+            int nr = r + DR[k], nc = c + DC[k];
+            while (nr >= 0 && nr < BOARD_SIZE && nc >= 0 && nc < BOARD_SIZE && b[nr][nc] == EMPTY) {
+                moves++; nr += DR[k]; nc += DC[k];
+            }
+        }
+        return moves;
+    }
+
+    Move getBestMove(int depth = 2) {
+        vector<Move> moves = generateMoves(myColor);
+        if (moves.empty()) return { -1, -1, -1, -1, -1, -1 };
+        Move bestMove = moves[0];
+        int maxVal = -999999;
+        for (auto& m : moves) {
+            board[m.r1][m.c1] = EMPTY; board[m.r2][m.c2] = myColor;
+            findBestShot(m); board[m.r3][m.c3] = OBSTACLE;
+            int val = evaluate(board);
+            board[m.r3][m.c3] = EMPTY; board[m.r2][m.c2] = EMPTY; board[m.r1][m.c1] = myColor;
+            if (val > maxVal) { maxVal = val; bestMove = m; }
+        }
+        return bestMove;
+    }
+
+private:
+    vector<Move> generateMoves(int color) {
+        vector<Move> moves;
+        for (int r = 0; r < BOARD_SIZE; r++)
+            for (int c = 0; c < BOARD_SIZE; c++)
+                if (board[r][c] == color)
+                    for (int k = 0; k < 8; k++) {
+                        int nr = r + DR[k], nc = c + DC[k];
+                        while (nr >= 0 && nr < BOARD_SIZE && nc >= 0 && nc < BOARD_SIZE && board[nr][nc] == EMPTY) {
+                            moves.push_back({ r, c, nr, nc, -1, -1 }); nr += DR[k]; nc += DC[k];
+                        }
+                    }
+        return moves;
+    }
+    void findBestShot(Move& m) {
+        int maxScore = -99999, br = -1, bc = -1;
+        for (int k = 0; k < 8; k++) {
+            int nr = m.r2 + DR[k], nc = m.c2 + DC[k];
+            while (nr >= 0 && nr < BOARD_SIZE && nc >= 0 && nc < BOARD_SIZE && board[nr][nc] == EMPTY) {
+                board[nr][nc] = OBSTACLE; int score = evaluate(board);
+                if (score > maxScore) { maxScore = score; br = nr; bc = nc; }
+                board[nr][nc] = EMPTY; nr += DR[k]; nc += DC[k];
+            }
+        }
+        if (br == -1) for (int i = 0; i < BOARD_SIZE; i++) for (int j = 0; j < BOARD_SIZE; j++) if (board[i][j] == EMPTY) { m.r3 = i; m.c3 = j; return; }
+        m.r3 = br; m.c3 = bc;
+    }
+};
+
+// ==========================================
+// Part 4: 游戏引擎 (GameEngine) - 核心重构
+// ==========================================
+class GameEngine {
+private:
+    RenderWindow window;
+    RenderTexture mainScene; // 后处理画布
+    ParticleSystem particles;
+    AmazonBot ai;
+
+    int board[BOARD_SIZE][BOARD_SIZE];
+    bool isPlayerTurn;
+    struct Point { int r, c; };
+    Point selected = { -1, -1 };
+    Point movedPos = { -1, -1 };
+    int stepState = 0;
+    bool gameOver = false;
+    wstring msgText;
+
+    // 动画状态
+    struct Anim {
+        bool active = false;
+        Vector2f start, end;
+        float t = 0;
+        int type;
+    } anim;
+
+    // 历史记录
+    struct History { int b[BOARD_SIZE][BOARD_SIZE]; bool turn; int step; };
+    vector<History> history;
+
+    // UI 状态
+    float uiAlpha = 0; // UI 淡入淡出
+    float portraitScaleP1 = 1.0f, portraitScaleP2 = 1.0f;
+
+public:
+    GameEngine() : window(VideoMode(WINDOW_WIDTH, WINDOW_HEIGHT), "Amazon Chess: Cyber Ruins", Style::Titlebar | Style::Close) {
+        window.setFramerateLimit(60);
+        window.setMouseCursorVisible(false); // 隐藏系统鼠标
+        AssetManager::get().load();
+        mainScene.create(WINDOW_WIDTH, WINDOW_HEIGHT);
+        initGame();
+    }
+
+    void initGame() {
+        memset(board, 0, sizeof(board));
+        board[0][2] = BLACK; board[0][5] = BLACK; board[2][0] = BLACK; board[2][7] = BLACK;
+        board[7][2] = WHITE; board[7][5] = WHITE; board[5][0] = WHITE; board[5][7] = WHITE;
+        ai.setColor(WHITE);
+        isPlayerTurn = true;
+        stepState = 0;
+        gameOver = false;
+        selected = { -1, -1 };
+        msgText = L"系统就绪：等待指令";
+        history.clear();
+        saveHistory();
+    }
+
+    void run() {
+        while (window.isOpen()) {
+            processEvents();
+            update();
+            render();
+        }
+    }
+
+private:
+    void processEvents() {
+        Event e;
+        while (window.pollEvent(e)) {
+            if (e.type == Event::Closed) window.close();
+            if (e.type == Event::MouseButtonPressed && e.mouseButton.button == Mouse::Left) {
+                int mx = e.mouseButton.x;
+                int my = e.mouseButton.y;
+
+                // 粒子点击反馈
+                particles.spawn(Vector2f(mx, my), Color::Cyan, 10, 5.0f);
+
+                if (!gameOver && isPlayerTurn && !anim.active) {
+                    int c = (mx - GRID_OFFSET_X) / CELL_SIZE;
+                    int r = (my - GRID_OFFSET_Y) / CELL_SIZE;
+                    if (r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE) handleBoardClick(r, c);
+                }
+                handleUIClick(mx, my);
+            }
+        }
+    }
+
+    void handleBoardClick(int r, int c) {
+        if (stepState == 0) {
+            if (board[r][c] == BLACK) {
+                selected = { r, c }; stepState = 1; msgText = L"指令：选择目标坐标";
+            }
+        }
+        else if (stepState == 1) {
+            if (r == selected.r && c == selected.c) {
+                stepState = 0; selected = { -1, -1 }; msgText = L"指令撤销";
+            }
+            else if (isValidPath(selected.r, selected.c, r, c)) {
+                playAnim(selected.r, selected.c, r, c, BLACK);
+                board[selected.r][selected.c] = EMPTY; board[r][c] = BLACK;
+                movedPos = { r, c }; stepState = 2; msgText = L"指令：部署干扰屏障";
+            }
+        }
+        else if (stepState == 2) {
+            if (isValidPath(movedPos.r, movedPos.c, r, c)) {
+                board[r][c] = OBSTACLE;
+                particles.spawn(getCellCenter(r, c), Color::Yellow, 20, 8.0f); // 障碍生成特效
+                stepState = 0; selected = { -1, -1 }; isPlayerTurn = false;
+                msgText = L"敌方 AI 运算中...";
+                saveHistory();
+            }
+        }
+    }
+
+    void handleUIClick(int x, int y) {
+        // 简单的按钮区域检测
+        if (x > 900 && x < 1100) {
+            if (y > 600 && y < 650) undo();
+            if (y > 660 && y < 710) saveGame();
+            if (y > 720 && y < 770) loadGame();
+        }
+    }
+
+    void update() {
+        particles.update();
+
+        // 动画更新
+        if (anim.active) {
+            anim.t += 0.05f;
+            if (anim.t >= 1.0f) anim.active = false;
+        }
+        // AI 逻辑
+        else if (!isPlayerTurn && !gameOver) {
+            // 假装思考动画
+            if (rand() % 10 == 0) particles.spawn(Vector2f(1100, 200), Color::Red, 2, 3.0f);
+
+            static int thinkTimer = 0;
+            if (++thinkTimer > 60) { // 1秒延迟
+                thinkTimer = 0;
+                ai.setBoard(board);
+                Move best = ai.getBestMove(2);
+                if (best.r1 == -1) {
+                    gameOver = true; msgText = L"胜利：敌方核心瘫痪";
+                }
+                else {
+                    playAnim(best.r1, best.c1, best.r2, best.c2, WHITE);
+                    board[best.r1][best.c1] = EMPTY; board[best.r2][best.c2] = WHITE; board[best.r3][best.c3] = OBSTACLE;
+                    particles.spawn(getCellCenter(best.r3, best.c3), Color::Red, 20, 8.0f);
+                    isPlayerTurn = true; msgText = L"警告：敌方已行动";
+                    saveHistory();
+                    if (!canMove(BLACK)) { gameOver = true; msgText = L"失败：连接中断"; }
+                }
+            }
+        }
+
+        // 立绘呼吸效果
+        static float time = 0; time += 0.05f;
+        float scaleBase = isPlayerTurn ? 1.05f : 0.95f;
+        portraitScaleP1 += (scaleBase - portraitScaleP1) * 0.1f;
+        portraitScaleP2 += ((isPlayerTurn ? 0.95f : 1.05f) - portraitScaleP2) * 0.1f;
+    }
+
+    void render() {
+        mainScene.clear(Color(10, 15, 25)); // 深蓝背景
+
+        // 1. 视差背景
+        drawParallaxBg();
+
+        // 2. 棋盘底座
+        if (AssetManager::get().texBoardBase.getSize().x > 0) {
+            Sprite base(AssetManager::get().texBoardBase);
+            base.setPosition(GRID_OFFSET_X - 20, GRID_OFFSET_Y - 20);
+            mainScene.draw(base);
+        }
+        else {
+            // 默认网格
+            for (int i = 0; i <= BOARD_SIZE; i++) {
+                RectangleShape h(Vector2f(BOARD_SIZE * CELL_SIZE, 2)); h.setPosition(GRID_OFFSET_X, GRID_OFFSET_Y + i * CELL_SIZE); h.setFillColor(Color(0, 255, 255, 50)); mainScene.draw(h);
+                RectangleShape v(Vector2f(2, BOARD_SIZE * CELL_SIZE)); v.setPosition(GRID_OFFSET_X + i * CELL_SIZE, GRID_OFFSET_Y); v.setFillColor(Color(0, 255, 255, 50)); mainScene.draw(v);
+            }
+        }
+
+        // 3. 棋子
+        for (int i = 0; i < BOARD_SIZE; i++) {
+            for (int j = 0; j < BOARD_SIZE; j++) {
+                if (anim.active && i == anim.end.y && j == anim.end.x) continue;
+                int type = board[i][j];
+                if (type != EMPTY) drawPiece(i, j, type);
+            }
+        }
+
+        // 4. 动画中的棋子
+        if (anim.active) {
+            Vector2f curr = anim.start + (anim.end - anim.start) * easeInOutCubic(anim.t);
+            drawPieceAt(curr, anim.type);
+            // 拖尾粒子
+            if (rand() % 2 == 0) particles.spawn(curr + Vector2f(45, 45), anim.type == BLACK ? Color::Cyan : Color::Magenta, 1, 2.0f);
+        }
+
+        // 5. 选中框 (呼吸效果)
+        if (selected.r != -1) {
+            float pulse = 1.0f + sin(clock() / 200.0f) * 0.1f;
+            RectangleShape sel(Vector2f(CELL_SIZE, CELL_SIZE));
+            sel.setOrigin(CELL_SIZE / 2, CELL_SIZE / 2);
+            sel.setPosition(getCellCenter(selected.r, selected.c));
+            sel.setScale(pulse, pulse);
+            sel.setFillColor(Color::Transparent);
+            sel.setOutlineColor(Color(0, 255, 255));
+            sel.setOutlineThickness(3);
+            mainScene.draw(sel);
+        }
+
+        // 6. 粒子渲染
+        particles.render(mainScene);
+
+        mainScene.display();
+
+        // 7. 后处理 (Bloom) 并输出到窗口
+        Sprite sceneSprite(mainScene.getTexture());
+        if (AssetManager::get().hasShader) {
+            window.draw(sceneSprite, &AssetManager::get().bloomShader);
+        }
+        else {
+            window.draw(sceneSprite);
+        }
+
+        // 8. UI 层 (不受 Bloom 影响)
+        drawUI();
+        drawCursor();
+
+        window.display();
+    }
+
+    // --- 绘图辅助 ---
+    Vector2f getCellCenter(int r, int c) {
+        return Vector2f(GRID_OFFSET_X + c * CELL_SIZE + CELL_SIZE / 2, GRID_OFFSET_Y + r * CELL_SIZE + CELL_SIZE / 2);
+    }
+
+    void drawPiece(int r, int c, int type) {
+        drawPieceAt(Vector2f(GRID_OFFSET_X + c * CELL_SIZE, GRID_OFFSET_Y + r * CELL_SIZE), type);
+    }
+
+    void drawPieceAt(Vector2f pos, int type) {
+        if (type == OBSTACLE) {
+            RectangleShape obs(Vector2f(40, 40));
+            obs.setOrigin(20, 20);
+            obs.setPosition(pos + Vector2f(45, 45));
+            obs.setFillColor(Color(100, 100, 100));
+            obs.setRotation(45);
+            mainScene.draw(obs);
+        }
+        else {
+            Sprite s;
+            if (type == BLACK && AssetManager::get().texP1.getSize().x > 0) s.setTexture(AssetManager::get().texP1);
+            else if (type == WHITE && AssetManager::get().texP2.getSize().x > 0) s.setTexture(AssetManager::get().texP2);
+
+            if (s.getTexture()) {
+                float scale = (float)(CELL_SIZE - 10) / s.getLocalBounds().width;
+                s.setScale(scale, scale);
+                s.setPosition(pos + Vector2f(5, 5));
+                mainScene.draw(s);
+            }
+            else {
+                CircleShape c(30); c.setOrigin(30, 30); c.setPosition(pos + Vector2f(45, 45));
+                c.setFillColor(type == BLACK ? Color::Cyan : Color::Magenta);
+                mainScene.draw(c);
+            }
+        }
+    }
+
+    void drawParallaxBg() {
+        Vector2i mouse = Mouse::getPosition(window);
+        float offX = (mouse.x - WINDOW_WIDTH / 2) * 0.05f;
+        float offY = (mouse.y - WINDOW_HEIGHT / 2) * 0.05f;
+
+        if (AssetManager::get().texBg1.getSize().x > 0) {
+            Sprite bg1(AssetManager::get().texBg1); bg1.setPosition(-offX * 0.2f, -offY * 0.2f); mainScene.draw(bg1);
+            Sprite bg2(AssetManager::get().texBg2); bg2.setPosition(-offX * 0.5f, -offY * 0.5f); mainScene.draw(bg2);
+            Sprite bg3(AssetManager::get().texBg3); bg3.setPosition(-offX * 1.0f, -offY * 1.0f); mainScene.draw(bg3);
+        }
+    }
+
+    void drawUI() {
+        // 右侧立绘
+        if (AssetManager::get().texP1Full.getSize().x > 0) {
+            Sprite p1(AssetManager::get().texP1Full);
+            p1.setOrigin(p1.getLocalBounds().width / 2, p1.getLocalBounds().height / 2);
+            p1.setPosition(1000, 600);
+            p1.setScale(0.5f * portraitScaleP1, 0.5f * portraitScaleP1);
+            p1.setColor(Color(255, 255, 255, isPlayerTurn ? 255 : 100));
+            window.draw(p1);
+        }
+        if (AssetManager::get().texP2Full.getSize().x > 0) {
+            Sprite p2(AssetManager::get().texP2Full);
+            p2.setOrigin(p2.getLocalBounds().width / 2, p2.getLocalBounds().height / 2);
+            p2.setPosition(1150, 200);
+            p2.setScale(0.5f * portraitScaleP2, 0.5f * portraitScaleP2);
+            p2.setColor(Color(255, 255, 255, !isPlayerTurn ? 255 : 100));
+            window.draw(p2);
+        }
+
+        // 状态栏
+        RectangleShape bar(Vector2f(WINDOW_WIDTH, 40));
+        bar.setPosition(0, WINDOW_HEIGHT - 40);
+        bar.setFillColor(Color(0, 0, 0, 200));
+        window.draw(bar);
+
+        Text txt;
+        txt.setFont(AssetManager::get().font);
+        txt.setString(msgText);
+        txt.setCharacterSize(20);
+        txt.setPosition(20, WINDOW_HEIGHT - 35);
+        window.draw(txt);
+
+        // 按钮
+        drawButton(L"悔  棋", 900, 600);
+        drawButton(L"存  档", 900, 660);
+        drawButton(L"读  档", 900, 720);
+    }
+
+    void drawButton(const wstring& str, int x, int y) {
+        RectangleShape btn(Vector2f(180, 40));
+        btn.setPosition(x, y);
+
+        // 简单的 Hover 效果
+        Vector2i m = Mouse::getPosition(window);
+        if (m.x > x && m.x < x + 180 && m.y > y && m.y < y + 40) {
+            btn.setFillColor(Color(0, 255, 255, 100));
+            btn.setOutlineColor(Color::White);
+        }
+        else {
+            btn.setFillColor(Color(0, 0, 0, 150));
+            btn.setOutlineColor(Color(0, 255, 255));
+        }
+        btn.setOutlineThickness(2);
+        window.draw(btn);
+
+        Text txt;
+        txt.setFont(AssetManager::get().font);
+        txt.setString(str);
+        txt.setCharacterSize(20);
+        txt.setPosition(x + 60, y + 8);
+        window.draw(txt);
+    }
+
+    void drawCursor() {
+        // 检查是否加载了光标图片
+        if (AssetManager::get().texCursor.getSize().x > 0) {
+            Sprite cur(AssetManager::get().texCursor);
+
+            // === 修正 1：强制缩放 ===
+            // 设定目标大小为 32 像素 (你可以根据喜好改成 48 或 64)
+            float targetSize = 64.0f;
+            float scale = targetSize / cur.getLocalBounds().width;
+            cur.setScale(scale, scale);
+
+            // === 修正 2：设置热点 (Hotspot) ===
+            // 默认情况下，光标的热点是图片的左上角 (0,0)。
+            // 如果你的图片是普通的箭头，这行不需要改。
+            // 如果你的图片是“瞄准镜”或“十字架”，你需要把热点设为中心：
+            // cur.setOrigin(cur.getLocalBounds().width / 2, cur.getLocalBounds().height / 2);
+
+            // 设置位置
+            Vector2i mousePos = Mouse::getPosition(window);
+            cur.setPosition((float)mousePos.x, (float)mousePos.y);
+
+            window.draw(cur);
+        }
+    }
+
+    // --- 逻辑辅助 ---
+    bool isValidPath(int r1, int c1, int r2, int c2) {
+        if (r2 < 0 || r2 >= BOARD_SIZE || c2 < 0 || c2 >= BOARD_SIZE) return false;
+        if (board[r2][c2] != EMPTY) return false;
+        int dr = r2 - r1, dc = c2 - c1;
+        if (dr == 0 && dc == 0) return false;
+        if (dr != 0 && dc != 0 && abs(dr) != abs(dc)) return false;
+        int stepR = (dr == 0) ? 0 : (dr > 0 ? 1 : -1);
+        int stepC = (dc == 0) ? 0 : (dc > 0 ? 1 : -1);
+        int r = r1 + stepR, c = c1 + stepC;
+        while (r != r2 || c != c2) {
+            if (board[r][c] != EMPTY) return false;
+            r += stepR; c += stepC;
+        }
+        return true;
+    }
+
+    bool canMove(int color) {
+        for (int i = 0; i < BOARD_SIZE; i++)
+            for (int j = 0; j < BOARD_SIZE; j++)
+                if (board[i][j] == color)
+                    for (int k = 0; k < 8; k++) {
+                        int nr = i + ai.DR[k], nc = j + ai.DC[k];
+                        if (nr >= 0 && nr < BOARD_SIZE && nc >= 0 && nc < BOARD_SIZE && board[nr][nc] == EMPTY) return true;
+                    }
+        return false;
+    }
+
+    void playAnim(int r1, int c1, int r2, int c2, int type) {
+        anim.active = true;
+        anim.start = getCellCenter(r1, c1) - Vector2f(45, 45); // 修正坐标
+        anim.end = getCellCenter(r2, c2) - Vector2f(45, 45);
+        anim.t = 0;
+        anim.type = type;
+    }
+
+    void saveHistory() {
+        History h; memcpy(h.b, board, sizeof(board)); h.turn = isPlayerTurn; h.step = stepState;
+        history.push_back(h);
+    }
+
+    void undo() {
+        if (history.size() > 2) {
+            history.pop_back(); history.pop_back();
+            History h = history.back(); memcpy(board, h.b, sizeof(board));
+            isPlayerTurn = true; stepState = 0; selected = { -1, -1 }; msgText = L"系统回滚完成";
+        }
+    }
+
+    void saveGame() {
+        ofstream out("save.dat");
+        out << isPlayerTurn << endl;
+        for (int i = 0; i < BOARD_SIZE; i++) {
+            for (int j = 0; j < BOARD_SIZE; j++) out << board[i][j] << " ";
+            out << endl;
+        }
+        msgText = L"数据已保存";
+    }
+
+    void loadGame() {
+        ifstream in("save.dat");
+        if (in) {
+            in >> isPlayerTurn;
+            for (int i = 0; i < BOARD_SIZE; i++)
+                for (int j = 0; j < BOARD_SIZE; j++) in >> board[i][j];
+            history.clear(); saveHistory();
+            msgText = L"数据已加载";
+        }
+    }
+};
+
+int main() {
+    GameEngine game;
+    game.run();
+    return 0;
+}
+
+
+
+
+/* 再是bloom.frag
+
+uniform sampler2D texture;
+void main() {
+    vec4 pixel = texture2D(texture, gl_TexCoord[0].xy);
+    // 简单的亮度提取 + 泛光模拟
+    float brightness = (pixel.r + pixel.g + pixel.b) / 3.0;
+    if (brightness > 0.7) {
+        gl_FragColor = pixel * 1.5; // 增强高光
+    } else {
+        gl_FragColor = pixel;
+    }
+}
